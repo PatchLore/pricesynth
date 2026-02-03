@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+ollama
+aiohttp
+beautifulsoup4
+markdownify
+pydantic<3.0
+python-multipart
+praw
+stripe>=7.0
+PyJWT>=2.0
+passlib[bcrypt]
+Pillow
