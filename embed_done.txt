@@ -1,0 +1,1 @@
+Embedded image from C:\Dev\Projects\Shadow\samplereport.png into index.html. Commit and deploy.
