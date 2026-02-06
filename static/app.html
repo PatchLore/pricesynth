@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shadow Pricing Analysis Tool</title>
+    <meta name="theme-color" content="#0f172a">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='24' font-size='24'>🔍</text></svg>">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { theme: { extend: { fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] } } } };</script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .gradient-text { background: linear-gradient(135deg, #a78bfa 0%, #60a5fa 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-slide-up { animation: slideUp 0.5s ease-out; }
+        .touch-target { min-height: 44px; min-width: 44px; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen antialiased">
+    <div class="max-w-2xl mx-auto px-4 py-10 md:py-14 pb-20">
+        <div class="flex justify-between items-center mb-6">
+            <a href="/" class="text-slate-400 hover:text-slate-200 text-sm">← Landing page</a>
+            <div id="authBar" class="flex items-center gap-3">
+                <button type="button" id="loginBtn" onclick="openAuthModal('login')" class="text-sm text-slate-400 hover:text-slate-200">Login</button>
+                <button type="button" id="registerBtn" onclick="openAuthModal('register')" class="text-sm text-slate-400 hover:text-slate-200">Register</button>
+                <div id="userMenuWrap" class="hidden flex items-center gap-2">
+                    <span id="userMenuEmail" class="text-sm text-slate-300"></span>
+                    <button type="button" onclick="logout()" class="text-sm text-slate-500 hover:text-slate-300">Logout</button>
+                </div>
+            </div>
+        </div>
+
+        <header class="text-center mb-8">
+            <h1 class="text-3xl md:text-4xl font-bold gradient-text mb-2">Shadow Pricing Analysis Tool</h1>
+            <p class="text-slate-400">Run a full 10-agent pricing analysis. Enter a competitor URL to analyze.</p>
+        </header>
+
+        <div class="rounded-2xl border border-slate-700 bg-slate-800/80 p-6 md:p-8 mb-6 animate-slide-up">
+            <label class="block text-sm font-medium text-slate-400 mb-2">Competitor URL</label>
+            <input type="url" id="urlInput" placeholder="https://competitor.com/pricing" class="w-full px-4 py-3.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500/50 mb-4 touch-target">
+            <p class="text-slate-500 text-sm mb-4">Both options run the same full 10-agent analysis. Free for testing; paid when live.</p>
+            <div class="flex flex-wrap gap-3">
+                <button type="button" id="previewBtn" onclick="startPreview()" class="touch-target px-5 py-3.5 rounded-xl font-medium border border-slate-600 text-slate-300 hover:bg-slate-700/50">Run Free Analysis (All 10 Agents)</button>
+                <button type="button" id="payBtn" onclick="startPaid()" class="touch-target px-5 py-3.5 rounded-xl font-semibold bg-gradient-to-r from-purple-500 to-blue-500 text-white hover:opacity-95">Get Full Report — £29</button>
+                <button type="button" id="freeBtn" onclick="openClaimModal()" class="touch-target px-5 py-3.5 rounded-xl font-medium border border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/10">Claim Free Audit (One per user)</button>
+            </div>
+            <p class="text-slate-500 text-xs mt-3">Free analysis available for testing. Reports delivered via email within 24 hours.</p>
+            <p id="error" class="text-red-400 text-sm mt-2 min-h-[1.25rem]"></p>
+        </div>
+
+        <div id="progressSection" class="hidden rounded-2xl border border-slate-700 bg-slate-800/80 p-6 md:p-8 mb-6 animate-slide-up">
+            <div class="flex justify-between items-center mb-2 text-sm">
+                <span id="agentCounter" class="font-semibold text-slate-200">Agent 0 of 10</span>
+                <span id="eta" class="text-slate-400">About 2 min remaining</span>
+            </div>
+            <div class="h-2.5 w-full rounded-full bg-slate-700 overflow-hidden mb-4">
+                <div id="progressFill" class="h-full rounded-full bg-gradient-to-r from-purple-500 to-blue-500 transition-all duration-500" style="width: 0%"></div>
+            </div>
+            <p id="currentAgent" class="text-slate-500 text-sm mb-4"></p>
+            <div id="agentList" class="space-y-2"></div>
+            <button type="button" id="stopBtn" onclick="stopAudit()" class="hidden mt-4 px-5 py-2.5 rounded-lg border border-red-500/60 text-red-400 hover:bg-red-500/10 text-sm font-semibold">Stop audit</button>
+        </div>
+
+        <div id="resultsSection" class="hidden rounded-2xl border border-slate-700 bg-slate-800/80 p-6 md:p-8 mb-6 animate-slide-up">
+            <div class="text-center mb-6 p-6 rounded-xl bg-slate-900/60 border border-slate-700">
+                <p class="text-xs uppercase tracking-wider text-slate-500 mb-1">Market Intelligence Estimate</p>
+                <p id="listPrice" class="text-lg text-slate-500 line-through mb-1">—</p>
+                <p id="marketRate" class="text-3xl md:text-4xl font-bold text-emerald-400">—</p>
+                <p id="confidence" class="text-sm text-slate-400 mt-2">—</p>
+                <p id="savings" class="text-sm text-slate-300 mt-2"></p>
+            </div>
+            <div id="analysisBlock" class="hidden mb-4">
+                <p class="text-xs uppercase text-slate-500 mb-1">Analysis</p>
+                <p id="rationale" class="text-slate-400 text-sm"></p>
+            </div>
+            <div id="caveatsBlock" class="hidden mb-4">
+                <p class="text-xs uppercase text-slate-500 mb-1">Caveats</p>
+                <p id="caveats" class="text-slate-500 text-xs"></p>
+            </div>
+            <p class="text-slate-500 text-xs mb-4">Market intelligence derived from publicly available sources. Estimates represent analytical modeling, not verified pricing.</p>
+            <div class="flex gap-3">
+                <button type="button" onclick="window.print()" class="px-5 py-3 rounded-xl border border-slate-600 text-slate-200 hover:bg-slate-700/50 text-sm font-semibold">Download report</button>
+                <button type="button" onclick="resetUI()" class="px-5 py-3 rounded-xl bg-gradient-to-r from-purple-500 to-blue-500 text-white hover:opacity-95 text-sm font-semibold">New audit</button>
+            </div>
+        </div>
+
+        <!-- Claim free audit modal -->
+        <div id="claimModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/90">
+            <div class="rounded-2xl border border-slate-700 bg-slate-800 p-6 w-full max-w-md">
+                <h3 class="text-lg font-semibold mb-2">Claim free audit</h3>
+                <p class="text-slate-400 text-sm mb-4">Enter your email. We'll create an account and run one full audit free.</p>
+                <input type="email" id="claimEmail" placeholder="you@example.com" class="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 mb-4">
+                <p id="claimError" class="text-red-400 text-sm mb-2 min-h-[1.25rem]"></p>
+                <div class="flex gap-3">
+                    <button type="button" onclick="closeClaimModal()" class="flex-1 py-3 rounded-xl border border-slate-600 text-slate-300">Cancel</button>
+                    <button type="button" id="claimSubmit" onclick="submitClaim()" class="flex-1 py-3 rounded-xl bg-gradient-to-r from-purple-500 to-blue-500 text-white font-semibold">Claim</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Auth modal -->
+        <div id="authModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/90">
+            <div class="rounded-2xl border border-slate-700 bg-slate-800 p-6 w-full max-w-md">
+                <div class="flex border-b border-slate-700 mb-4">
+                    <button type="button" id="authTabLogin" onclick="switchAuth('login')" class="flex-1 py-2 text-sm font-semibold text-purple-400 border-b-2 border-purple-500 -mb-px">Login</button>
+                    <button type="button" id="authTabReg" onclick="switchAuth('register')" class="flex-1 py-2 text-sm font-semibold text-slate-400 -mb-px">Register</button>
+                </div>
+                <div id="authLogin">
+                    <input type="email" id="loginEmail" placeholder="Email" class="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 mb-3">
+                    <input type="password" id="loginPassword" placeholder="Password" class="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 mb-3">
+                    <p id="loginError" class="text-red-400 text-sm mb-2 min-h-[1.25rem]"></p>
+                    <button type="button" onclick="submitLogin()" class="w-full py-3 rounded-xl bg-gradient-to-r from-purple-500 to-blue-500 text-white font-semibold">Login</button>
+                </div>
+                <div id="authRegister" class="hidden">
+                    <input type="email" id="regEmail" placeholder="Email" class="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 mb-3">
+                    <input type="password" id="regPassword" placeholder="Password (min 8)" class="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 mb-3">
+                    <p id="regError" class="text-red-400 text-sm mb-2 min-h-[1.25rem]"></p>
+                    <button type="button" onclick="submitRegister()" class="w-full py-3 rounded-xl bg-gradient-to-r from-purple-500 to-blue-500 text-white font-semibold">Register</button>
+                </div>
+                <button type="button" onclick="closeAuthModal()" class="mt-3 w-full py-2 text-sm text-slate-500">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const AUTH_KEY = "shadow_token";
+        const AGENTS = [
+            { name: "Official Page Scanner", icon: "🌐" },
+            { name: "Community Analyst", icon: "🔍" },
+            { name: "G2 Review Extractor", icon: "⭐" },
+            { name: "Wayback Historian", icon: "📚" },
+            { name: "Partner Program Researcher", icon: "📄" },
+            { name: "Forum Thread Analyzer", icon: "💬" },
+            { name: "Twitter/X Tracker", icon: "🐦" },
+            { name: "LinkedIn Intel Gatherer", icon: "💼" },
+            { name: "Public Record Scanner", icon: "👥" },
+            { name: "Consensus Validator", icon: "🎯" }
+        ];
+        let ws = null;
+        let user = null;
+
+        function getToken() { return localStorage.getItem(AUTH_KEY); }
+        function setToken(t) { if (t) localStorage.setItem(AUTH_KEY, t); else localStorage.removeItem(AUTH_KEY); }
+
+        async function fetchMe() {
+            const t = getToken();
+            if (!t) { user = null; renderAuth(); return; }
+            try {
+                const r = await fetch("/api/me", { headers: { Authorization: "Bearer " + t } });
+                if (r.status === 401) { setToken(""); user = null; }
+                else if (r.ok) user = await r.json();
+                else user = null;
+            } catch (e) { user = null; }
+            renderAuth();
+        }
+        function renderAuth() {
+            document.getElementById("loginBtn").classList.toggle("hidden", !!user);
+            document.getElementById("registerBtn").classList.toggle("hidden", !!user);
+            document.getElementById("userMenuWrap").classList.toggle("hidden", !user);
+            if (user) document.getElementById("userMenuEmail").textContent = user.email;
+        }
+        function logout() { setToken(""); user = null; renderAuth(); }
+
+        function openAuthModal(tab) {
+            document.getElementById("authModal").classList.remove("hidden");
+            switchAuth(tab);
+        }
+        function closeAuthModal() { document.getElementById("authModal").classList.add("hidden"); }
+        function switchAuth(tab) {
+            const isLogin = tab === "login";
+            document.getElementById("authTabLogin").classList.toggle("text-purple-400", isLogin);
+            document.getElementById("authTabLogin").classList.toggle("border-b-2", isLogin);
+            document.getElementById("authTabReg").classList.toggle("text-purple-400", !isLogin);
+            document.getElementById("authRegister").classList.toggle("hidden", isLogin);
+            document.getElementById("authLogin").classList.toggle("hidden", !isLogin);
+        }
+        async function submitLogin() {
+            const email = document.getElementById("loginEmail").value.trim();
+            const password = document.getElementById("loginPassword").value;
+            document.getElementById("loginError").textContent = "";
+            if (!email || !password) { document.getElementById("loginError").textContent = "Email and password required."; return; }
+            try {
+                const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) { document.getElementById("loginError").textContent = d.detail || "Login failed."; return; }
+                setToken(d.token); user = d.user; renderAuth(); closeAuthModal();
+            } catch (e) { document.getElementById("loginError").textContent = "Something went wrong."; }
+        }
+        async function submitRegister() {
+            const email = document.getElementById("regEmail").value.trim();
+            const password = document.getElementById("regPassword").value;
+            document.getElementById("regError").textContent = "";
+            if (!email || !password) { document.getElementById("regError").textContent = "Email and password required."; return; }
+            if (password.length < 8) { document.getElementById("regError").textContent = "Password must be at least 8 characters."; return; }
+            try {
+                const r = await fetch("/api/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) { document.getElementById("regError").textContent = d.detail || "Registration failed."; return; }
+                setToken(d.token); user = d.user; renderAuth(); closeAuthModal();
+            } catch (e) { document.getElementById("regError").textContent = "Something went wrong."; }
+        }
+
+        function openClaimModal() { document.getElementById("claimModal").classList.remove("hidden"); document.getElementById("claimError").textContent = ""; }
+        function closeClaimModal() { document.getElementById("claimModal").classList.add("hidden"); }
+
+        function normUrl(u) {
+            if (!u || typeof u !== "string") return u;
+            u = u.trim();
+            if (!u.startsWith("http")) u = "https://" + u;
+            return u;
+        }
+        function setError(msg) { document.getElementById("error").textContent = msg || ""; }
+
+        async function startPreview() {
+            const url = normUrl(document.getElementById("urlInput").value);
+            if (!url) { setError("Please enter a URL."); return; }
+            document.getElementById("urlInput").value = url;
+            setError("");
+            try {
+                const r = await fetch("/api/audit", { method: "POST", headers: { "Content-Type": "application/json", ...(getToken() ? { Authorization: "Bearer " + getToken() } : {}) }, body: JSON.stringify({ url }) });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) { setError(d.detail || "Could not start audit."); return; }
+                connectWS(d.audit_id);
+            } catch (e) { setError("Something went wrong."); }
+        }
+        async function startPaid() {
+            const url = normUrl(document.getElementById("urlInput").value);
+            if (!url) { setError("Please enter a URL."); return; }
+            document.getElementById("urlInput").value = url;
+            setError("");
+            try {
+                const r = await fetch("/api/create-checkout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) { setError(d.detail || "Checkout failed."); return; }
+                if (d.checkout_url) { window.location.href = d.checkout_url; return; }
+                setError("No checkout URL.");
+            } catch (e) { setError("Something went wrong."); }
+        }
+        async function submitClaim() {
+            const email = document.getElementById("claimEmail").value.trim();
+            document.getElementById("claimError").textContent = "";
+            if (!email || !email.includes("@")) { document.getElementById("claimError").textContent = "Valid email required."; return; }
+            try {
+                const r = await fetch("/api/claim-free-audit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: normUrl(document.getElementById("urlInput").value), email }) });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) { document.getElementById("claimError").textContent = d.detail || "Claim failed."; return; }
+                setToken(d.token); user = d.user; renderAuth(); closeClaimModal();
+                connectWS(d.audit_id, d.token);
+            } catch (e) { document.getElementById("claimError").textContent = "Something went wrong."; }
+        }
+
+        function initAgentList() {
+            const el = document.getElementById("agentList");
+            el.innerHTML = AGENTS.map((a, i) => `<div class="flex items-center gap-3 p-2 rounded-lg bg-slate-900/60 border border-slate-700" id="agent-${i}"><span class="text-xl">${a.icon}</span><span class="flex-1 text-sm font-medium">${a.name}</span><span class="text-xs px-2 py-1 rounded-full bg-slate-700 text-slate-400" id="status-${i}">Waiting</span></div>`).join("");
+        }
+        function connectWS(auditId, token) {
+            document.getElementById("progressSection").classList.remove("hidden");
+            document.getElementById("resultsSection").classList.add("hidden");
+            initAgentList();
+            const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+            let url = `${protocol}//${location.host}/ws/${auditId}`;
+            if (token) url += "?token=" + encodeURIComponent(token);
+            ws = new WebSocket(url);
+            ws.onmessage = (ev) => {
+                const data = JSON.parse(ev.data);
+                if (data.error) { setError(data.error); return; }
+                if (data.agent != null) {
+                    document.getElementById("agentCounter").textContent = `Agent ${data.agent} of ${data.total || 10}`;
+                    document.getElementById("currentAgent").textContent = data.name ? `Scanning ${data.name}…` : "";
+                    document.getElementById("progressFill").style.width = (data.progress_percent || 0) + "%";
+                    const statusEl = document.getElementById("status-" + (data.agent - 1));
+                    if (statusEl) statusEl.textContent = data.status === "completed" ? "Complete" : (data.status || "Running");
+                    if (data.status === "completed") statusEl.className = "text-xs px-2 py-1 rounded-full bg-emerald-500/20 text-emerald-400";
+                }
+                if (data.type === "complete") {
+                    document.getElementById("progressSection").classList.add("hidden");
+                    document.getElementById("resultsSection").classList.remove("hidden");
+                    showResults(data);
+                    ws.close(); ws = null;
+                }
+            };
+            ws.onclose = () => { document.getElementById("stopBtn").classList.add("hidden"); };
+            ws.onopen = () => { document.getElementById("stopBtn").classList.remove("hidden"); };
+        }
+        function stopAudit() { if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ action: "stop" })); document.getElementById("stopBtn").classList.add("hidden"); } }
+
+        function showResults(data) {
+            const c = data.data || {};
+            const listPrice = c.list_price;
+            const minP = c.shadow_price_min;
+            const maxP = c.shadow_price_max;
+            document.getElementById("listPrice").textContent = listPrice != null ? `Published: $${listPrice}/mo` : "—";
+            if (minP != null && maxP != null) document.getElementById("marketRate").textContent = `$${minP}–$${maxP}/mo`;
+            else if (c.shadow_price != null) document.getElementById("marketRate").textContent = `$${c.shadow_price}/mo`;
+            else document.getElementById("marketRate").textContent = "—";
+            const conf = c.confidence;
+            const confLabel = conf >= 0.7 ? "High" : conf >= 0.4 ? "Medium" : "Low";
+            document.getElementById("confidence").textContent = `Confidence: ${confLabel}`;
+            const negLow = c.typical_negotiation_range_low;
+            const negHigh = c.typical_negotiation_range_high;
+            if (negLow != null && negHigh != null) document.getElementById("savings").textContent = `Typical negotiation range: ${negLow}–${negHigh}% below published`;
+            else document.getElementById("savings").textContent = "";
+            if (c.rationale) { document.getElementById("analysisBlock").classList.remove("hidden"); document.getElementById("rationale").textContent = c.rationale; }
+            if (c.caveats) { document.getElementById("caveatsBlock").classList.remove("hidden"); document.getElementById("caveats").textContent = c.caveats; }
+        }
+        function resetUI() {
+            document.getElementById("resultsSection").classList.add("hidden");
+            document.getElementById("progressSection").classList.add("hidden");
+            document.getElementById("urlInput").value = "";
+            setError("");
+        }
+
+        (function init() {
+            fetchMe();
+            const params = new URLSearchParams(location.search);
+            const auditId = params.get("audit_id");
+            const paid = params.get("paid") === "true";
+            if (auditId && paid) {
+                document.getElementById("urlInput").value = ""; // URL came from checkout
+                connectWS(auditId, getToken());
+            }
+        })();
+    </script>
+</body>
+</html>
