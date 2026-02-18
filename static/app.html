@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Shadow Pricing Analysis Tool</title>
+    <title>Public Pricing Benchmark Tool</title>
     <meta name="theme-color" content="#0f172a">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='24' font-size='24'>🔍</text></svg>">
     <script src="https://cdn.tailwindcss.com"></script>
@@ -32,16 +32,16 @@
         </div>
 
         <header class="text-center mb-8">
-            <h1 class="text-3xl md:text-4xl font-bold gradient-text mb-2">Shadow Pricing Analysis Tool</h1>
-            <p class="text-slate-400">Run a full 10-agent pricing analysis. Enter a competitor URL to analyze.</p>
+            <h1 class="text-3xl md:text-4xl font-bold gradient-text mb-2">Public Pricing Benchmark Analysis</h1>
+            <p class="text-slate-400">Run a multi-source pricing analysis using verified public data sources.</p>
         </header>
 
         <div class="rounded-2xl border border-slate-700 bg-slate-800/80 p-6 md:p-8 mb-6 animate-slide-up">
             <label class="block text-sm font-medium text-slate-400 mb-2">Competitor URL</label>
             <input type="url" id="urlInput" placeholder="https://competitor.com/pricing" class="w-full px-4 py-3.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500/50 mb-4 touch-target">
-            <p class="text-slate-500 text-sm mb-4">Both options run the same full 10-agent analysis. Free for testing; paid when live.</p>
+            <p class="text-slate-500 text-sm mb-4">Analysis uses verified public data sources. Free for testing; paid when live.</p>
             <div class="flex flex-wrap gap-3">
-                <button type="button" id="previewBtn" onclick="startPreview()" class="touch-target px-5 py-3.5 rounded-xl font-medium border border-slate-600 text-slate-300 hover:bg-slate-700/50">Run Free Analysis (All 10 Agents)</button>
+                <button type="button" id="previewBtn" onclick="startPreview()" class="touch-target px-5 py-3.5 rounded-xl font-medium border border-slate-600 text-slate-300 hover:bg-slate-700/50">Run Free Analysis</button>
                 <button type="button" id="payBtn" onclick="startPaid()" class="touch-target px-5 py-3.5 rounded-xl font-semibold bg-gradient-to-r from-purple-500 to-blue-500 text-white hover:opacity-95">Get Full Report — £29</button>
                 <button type="button" id="freeBtn" onclick="openClaimModal()" class="touch-target px-5 py-3.5 rounded-xl font-medium border border-emerald-500/50 text-emerald-400 hover:bg-emerald-500/10">Claim Free Audit (One per user)</button>
             </div>
@@ -51,7 +51,7 @@
 
         <div id="progressSection" class="hidden rounded-2xl border border-slate-700 bg-slate-800/80 p-6 md:p-8 mb-6 animate-slide-up">
             <div class="flex justify-between items-center mb-2 text-sm">
-                <span id="agentCounter" class="font-semibold text-slate-200">Agent 0 of 10</span>
+                <span id="agentCounter" class="font-semibold text-slate-200">Source 0 of 10</span>
                 <span id="eta" class="text-slate-400">About 2 min remaining</span>
             </div>
             <div class="h-2.5 w-full rounded-full bg-slate-700 overflow-hidden mb-4">
@@ -125,18 +125,7 @@
 
     <script>
         const AUTH_KEY = "shadow_token";
-        const AGENTS = [
-            { name: "Official Page Scanner", icon: "🌐" },
-            { name: "Community Analyst", icon: "🔍" },
-            { name: "G2 Review Extractor", icon: "⭐" },
-            { name: "Wayback Historian", icon: "📚" },
-            { name: "Partner Program Researcher", icon: "📄" },
-            { name: "Forum Thread Analyzer", icon: "💬" },
-            { name: "Twitter/X Tracker", icon: "🐦" },
-            { name: "LinkedIn Intel Gatherer", icon: "💼" },
-            { name: "Public Record Scanner", icon: "👥" },
-            { name: "Consensus Validator", icon: "🎯" }
-        ];
+        let AGENTS = [];  // Fetched from /api/agents
         let ws = null;
         let user = null;
 
@@ -250,13 +239,30 @@
             } catch (e) { document.getElementById("claimError").textContent = "Something went wrong."; }
         }
 
+        async function fetchAgents() {
+            try {
+                const r = await fetch("/api/agents");
+                if (r.ok) {
+                    AGENTS = await r.json();
+                }
+            } catch (e) {
+                console.error("Failed to fetch agents:", e);
+            }
+        }
+
         function initAgentList() {
             const el = document.getElementById("agentList");
-            el.innerHTML = AGENTS.map((a, i) => `<div class="flex items-center gap-3 p-2 rounded-lg bg-slate-900/60 border border-slate-700" id="agent-${i}"><span class="text-xl">${a.icon}</span><span class="flex-1 text-sm font-medium">${a.name}</span><span class="text-xs px-2 py-1 rounded-full bg-slate-700 text-slate-400" id="status-${i}">Waiting</span></div>`).join("");
+            el.innerHTML = AGENTS.map((a, i) => {
+                const isDeprecated = a.deprecated || !a.active;
+                const deprecatedClass = isDeprecated ? "opacity-50" : "";
+                const deprecatedBadge = isDeprecated ? '<span class="text-xs px-2 py-1 rounded-full bg-slate-600 text-slate-500">Unavailable</span>' : "";
+                return `<div class="flex items-center gap-3 p-2 rounded-lg bg-slate-900/60 border border-slate-700 ${deprecatedClass}" id="agent-${i}"><span class="text-xl">${a.icon || '📄'}</span><span class="flex-1 text-sm font-medium">${a.name}</span>${deprecatedBadge}<span class="text-xs px-2 py-1 rounded-full bg-slate-700 text-slate-400" id="status-${i}">${isDeprecated ? 'N/A' : 'Waiting'}</span></div>`;
+            }).join("");
         }
-        function connectWS(auditId, token) {
+        async function connectWS(auditId, token) {
             document.getElementById("progressSection").classList.remove("hidden");
             document.getElementById("resultsSection").classList.add("hidden");
+            if (AGENTS.length === 0) await fetchAgents();
             initAgentList();
             const protocol = location.protocol === "https:" ? "wss:" : "ws:";
             let url = `${protocol}//${location.host}/ws/${auditId}`;
@@ -313,6 +319,7 @@
 
         (function init() {
             fetchMe();
+            fetchAgents();  // Pre-fetch agents on page load
             const params = new URLSearchParams(location.search);
             const auditId = params.get("audit_id");
             const paid = params.get("paid") === "true";

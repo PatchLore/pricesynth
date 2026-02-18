@@ -10,7 +10,6 @@ import time
 import urllib.request
 from datetime import datetime
 from typing import List, Dict, Optional, Any
-from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -18,7 +17,7 @@ logger = logging.getLogger(__name__)
 import aiohttp
 from bs4 import BeautifulSoup
 import markdownify
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, Request, Depends, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Depends, Header
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, FileResponse
@@ -36,6 +35,11 @@ except ImportError:
     jwt = None
 
 try:
+    import resend
+except ImportError:
+    resend = None
+
+try:
     from passlib.context import CryptContext
     pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 except ImportError:
@@ -49,6 +53,10 @@ except ImportError:
 
 # Only use mock when the ollama package is not installed; otherwise we try real Ollama first
 OLLAMA_PACKAGE_AVAILABLE = _ollama_module is not None
+
+# ============== AUDITOR (COMPLIANT MODULE) ==============
+from auditor.orchestrator import run_audit, get_agent_list_for_frontend
+from auditor.agents.registry import get_agent_by_id
 
 # ============== CONFIG ==============
 DB_FILE = "pricing_intel.db"
@@ -201,6 +209,108 @@ def _run_ollama_pull() -> bool:
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_CENTS = 4900  # $49 USD
+
+# ============== EMAIL (RESEND) ==============
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+FROM_EMAIL = os.environ.get("FROM_EMAIL", "reports@pricingbenchmark.com")
+
+
+def send_report_email(to_email: str, audit_id: str, target_url: str, base_url: str) -> bool:
+    """
+    Send report ready email via Resend.
+    Returns True if sent successfully, False otherwise.
+    Logs errors but never raises exceptions.
+    """
+    if not resend or not RESEND_API_KEY:
+        logger.warning("Email not sent: Resend not configured (set RESEND_API_KEY)")
+        return False
+
+    if not to_email:
+        logger.warning("Email not sent: no recipient email")
+        return False
+
+    report_url = f"{base_url}/audit/{audit_id}"
+
+    try:
+        resend.api_key = RESEND_API_KEY
+        response = resend.Emails.send({
+            "from": FROM_EMAIL,
+            "to": to_email,
+            "subject": "Your Public Pricing Benchmark is Ready",
+            "html": f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #1a1a1a; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+        .header {{ background: linear-gradient(135deg, #a78bfa 0%, #60a5fa 100%); color: white; padding: 30px; text-align: center; border-radius: 12px 12px 0 0; }}
+        .content {{ background: #f8fafc; padding: 30px; border-radius: 0 0 12px 12px; }}
+        .button {{ display: inline-block; background: linear-gradient(135deg, #a78bfa 0%, #60a5fa 100%); color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; }}
+        .footer {{ margin-top: 20px; font-size: 12px; color: #64748b; text-align: center; }}
+        .url {{ background: #e2e8f0; padding: 8px 12px; border-radius: 6px; font-family: monospace; font-size: 13px; word-break: break-all; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1 style="margin: 0;">📊 Your Report is Ready</h1>
+        </div>
+        <div class="content">
+            <p>Thank you for your purchase! Your Public Pricing Benchmark analysis has been completed.</p>
+            
+            <p><strong>Target URL:</strong><br>
+            <span class="url">{target_url}</span></p>
+            
+            <p style="text-align: center; margin: 30px 0;">
+                <a href="{report_url}" class="button">View Your Report</a>
+            </p>
+            
+            <p>Your report includes:</p>
+            <ul>
+                <li>Market intelligence estimate</li>
+                <li>Price range analysis from verified public sources</li>
+                <li>Confidence assessment</li>
+                <li>Detailed methodology and caveats</li>
+            </ul>
+            
+            <p style="font-size: 14px; color: #64748b;">
+                <strong>Important:</strong> Estimates represent analytical modeling based on publicly available data, not verified pricing. 
+                Conduct independent verification before making business decisions.
+            </p>
+        </div>
+        <div class="footer">
+            <p>Public Pricing Benchmark Tool<br>
+            This report was purchased and is available for your use.</p>
+        </div>
+    </div>
+</body>
+</html>
+""",
+            "text": f"""Your Public Pricing Benchmark is Ready
+
+Target URL: {target_url}
+
+View your report: {report_url}
+
+Your report includes:
+- Market intelligence estimate
+- Price range analysis from verified public sources
+- Confidence assessment
+- Detailed methodology and caveats
+
+IMPORTANT: Estimates represent analytical modeling based on publicly available data, not verified pricing. Conduct independent verification before making business decisions.
+
+---
+Public Pricing Benchmark Tool
+"""
+        })
+        logger.info("Email sent successfully to %s for audit %s (id: %s)", to_email, audit_id, response.get("id"))
+        return True
+    except Exception as e:
+        logger.error("Failed to send email to %s for audit %s: %s", to_email, audit_id, e)
+        return False
 
 # ============== SAFETY LIMITS ==============
 AGENT_TIMEOUT_SECONDS = 120  # 2 minutes per agent for local CPU
@@ -481,20 +591,6 @@ def db_get_cached_result(url: str):
     except Exception:
         return None
 
-# ============== AGENT DEFINITIONS ==============
-AGENTS = [
-    {"id": 1, "name": "Official Page Scanner", "type": "website", "icon": "🌐"},
-    {"id": 2, "name": "Community Analyst", "type": "reddit", "icon": "🔍"},
-    {"id": 3, "name": "G2 Review Extractor", "type": "reviews", "icon": "⭐"},
-    {"id": 4, "name": "Wayback Historian", "type": "historical", "icon": "📚"},
-    {"id": 5, "name": "Partner Program Researcher", "type": "pdf", "icon": "📄"},
-    {"id": 6, "name": "Forum Thread Analyzer", "type": "forums", "icon": "💬"},
-    {"id": 7, "name": "Twitter/X Tracker", "type": "social", "icon": "🐦"},
-    {"id": 8, "name": "LinkedIn Intel Gatherer", "type": "linkedin", "icon": "💼"},
-    {"id": 9, "name": "Public Record Scanner", "type": "community", "icon": "👥"},
-    {"id": 10, "name": "Consensus Validator", "type": "synthesis", "icon": "🎯"}
-]
-
 # ============== SCRAPING HELPERS ==============
 def _domain_from_url(url: str) -> str:
     """Extract hostname from URL (e.g. https://www.stripe.com/pricing -> stripe.com)."""
@@ -506,13 +602,6 @@ def _domain_from_url(url: str) -> str:
         return netloc.lower().lstrip("www.")
     except Exception:
         return ""
-
-
-def _g2_slug_from_domain(domain: str) -> str:
-    """G2 product slugs are usually the brand name (e.g. stripe.com -> stripe)."""
-    if not domain:
-        return ""
-    return domain.split(".")[0] if "." in domain else domain
 
 
 # ============== SCRAPING LAYER (FREE) ==============
@@ -546,69 +635,6 @@ class FreeScraper:
             return ""
         except Exception as e:
             logger.warning("Scraper fetch failed for %s: %s", url, e)
-            return ""
-
-    async def fetch_reddit(self, target_url: str) -> str:
-        """Real Reddit: PRAW if credentials set, else old.reddit.com search for domain + pricing + cost."""
-        domain = _domain_from_url(target_url)
-        if not domain:
-            return ""
-        query = f"{domain} pricing cost"
-        # Prefer PRAW if credentials available (run in thread - PRAW is sync)
-        if os.environ.get("REDDIT_CLIENT_ID") and os.environ.get("REDDIT_CLIENT_SECRET"):
-            try:
-                return await asyncio.to_thread(self._fetch_reddit_praw_sync, query)
-            except Exception as e:
-                logger.warning("Reddit PRAW failed, falling back to scrape: %s", e)
-        return await self._fetch_reddit_old_reddit(query)
-
-    def _fetch_reddit_praw_sync(self, query: str) -> str:
-        """Search Reddit via PRAW (sync)."""
-        try:
-            import praw
-            reddit = praw.Reddit(
-                client_id=os.environ["REDDIT_CLIENT_ID"],
-                client_secret=os.environ["REDDIT_CLIENT_SECRET"],
-                user_agent="pricing-intel/1.0",
-            )
-            subs = list(reddit.subreddit("all").search(query, limit=15, time_filter="year"))
-            parts = []
-            for s in subs:
-                parts.append(f"[{s.title}]\n{s.self_text or ''}\n")
-            return "\n".join(parts) if parts else ""
-        except Exception as e:
-            logger.warning("Reddit PRAW error: %s", e)
-            return ""
-
-    async def _fetch_reddit_old_reddit(self, query: str) -> str:
-        """Scrape old.reddit.com search results."""
-        try:
-            url = "https://old.reddit.com/search"
-            params = {"q": query, "sort": "relevance", "t": "year"}
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=self.headers, timeout=self.timeout, params=params) as resp:
-                    if resp.status in (403, 429):
-                        logger.warning("Reddit scrape %s (rate limit or block)", resp.status)
-                        return ""
-                    if resp.status != 200:
-                        logger.warning("Reddit scrape HTTP %s", resp.status)
-                        return ""
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, "html.parser")
-                    parts = []
-                    for post in soup.select("div.thing")[:20]:
-                        title_el = post.select_one("a.title")
-                        if title_el:
-                            title = title_el.get_text(strip=True)
-                            body_el = post.select_one("div.usertext-body")
-                            body = (body_el.get_text(strip=True)[:500] if body_el else "")
-                            parts.append(f"[{title}]\n{body}")
-                    return "\n".join(parts) if parts else ""
-        except asyncio.TimeoutError:
-            logger.warning("Reddit scrape timeout")
-            return ""
-        except Exception as e:
-            logger.warning("Reddit scrape failed: %s", e)
             return ""
 
     async def fetch_wayback(self, url: str) -> str:
@@ -665,34 +691,6 @@ class FreeScraper:
             return ""
         except Exception as e:
             logger.warning("Wayback failed: %s", e)
-            return ""
-
-    async def fetch_g2_reviews(self, target_url: str) -> str:
-        """Scrape G2 reviews page: https://www.g2.com/products/{slug}/reviews."""
-        domain = _domain_from_url(target_url)
-        slug = _g2_slug_from_domain(domain)
-        if not slug:
-            return ""
-        try:
-            url = f"https://www.g2.com/products/{slug}/reviews"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=self.headers, timeout=self.timeout) as resp:
-                    if resp.status in (403, 404, 429):
-                        logger.warning("G2 reviews HTTP %s for %s", resp.status, url)
-                        return ""
-                    if resp.status != 200:
-                        logger.warning("G2 reviews HTTP %s for %s", resp.status, url)
-                        return ""
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, "html.parser")
-                    for tag in soup(["script", "style"]):
-                        tag.decompose()
-                    return markdownify.markdownify(str(soup))
-        except asyncio.TimeoutError:
-            logger.warning("G2 reviews timeout for %s", slug)
-            return ""
-        except Exception as e:
-            logger.warning("G2 reviews failed for %s: %s", slug, e)
             return ""
 
 scraper = FreeScraper()
@@ -841,207 +839,109 @@ def _normalize_price_found(value: Any) -> Optional[float]:
     return round(p, 2)
 
 
-# ============== SERIAL SWARM LOGIC ==============
-class ShadowSwarm:
+# ============== AUDIT EXECUTOR (USES AUDITOR MODULE) ==============
+class AuditExecutor:
+    """
+    Executes audits using the compliant auditor module.
+    Wraps run_audit with WebSocket progress streaming.
+    """
+
     def __init__(self, audit_id: str, websocket: WebSocket):
         self.audit_id = audit_id
         self.ws = websocket
         self.results = []
+        self.agent_list = get_agent_list_for_frontend()
+        self.total_agents = len(self.agent_list)
 
-    async def send_progress(self, current: int, total: int, agent_name: str, status: str = "running"):
+    async def send_progress(self, agent_id: int, agent_name: str, status: str = "running"):
+        """Send progress update to WebSocket client."""
         payload = {
-            "agent": current,
-            "total": total,
+            "agent": agent_id,
+            "total": self.total_agents,
             "name": agent_name,
             "status": status,
-            "progress_percent": int((current / total) * 100)
+            "progress_percent": int((agent_id / self.total_agents) * 100)
         }
-        logger.info("WebSocket sending: agent=%s status=%s name=%s", current, status, agent_name)
+        logger.info("WebSocket sending: agent=%s status=%s name=%s", agent_id, status, agent_name)
         await self.ws.send_json(payload)
         logger.debug("WebSocket message sent")
 
-    @staticmethod
-    def _median_price_from_results(results: List[Dict]) -> Optional[float]:
-        """Median of validated price_found from agents 1-9."""
-        prices = []
-        for r in results:
-            p = _normalize_price_found(r.get("price_found"))
-            if p is not None:
-                prices.append(p)
-        if not prices:
-            return None
-        prices.sort()
-        n = len(prices)
-        if n % 2 == 1:
-            return prices[n // 2]
-        return (prices[n // 2 - 1] + prices[n // 2]) / 2.0
-
-    def _compute_consensus_programmatic(self) -> Dict[str, Any]:
-        """
-        Agent 10 (Synthesis): senior pricing analyst consolidating multiple estimates.
-        - Weight by confidence (high=3x, medium=2x, low=1x).
-        - Use estimated_range_low/high when present; else price_found.
-        - Flag insufficient_consensus when variance > 50%.
-        - Output: rationale, caveats, typical_negotiation_range_low/high.
-        """
-        weighted_prices: List[float] = []
-        weights: List[float] = []
-        ranges_low: List[float] = []
-        ranges_high: List[float] = []
-        rationales: List[str] = []
-        caveats_list: List[str] = []
-        total_source_count = 0
-        for r in self.results:
-            low = _normalize_price_found(r.get("estimated_range_low"))
-            high = _normalize_price_found(r.get("estimated_range_high"))
-            p = _normalize_price_found(r.get("price_found"))
-            if low is not None and high is not None:
-                mid = (low + high) / 2
-                ranges_low.append(low)
-                ranges_high.append(high)
-                weighted_prices.append(mid)
-            elif p is not None:
-                weighted_prices.append(p)
-                ranges_low.append(p)
-                ranges_high.append(p)
-            else:
-                continue
-            c = r.get("confidence")
-            if c is not None and isinstance(c, (int, float)):
-                w = 3.0 if c >= 0.7 else (2.0 if c >= 0.4 else 1.0)
-            else:
-                w = 1.0
-            weights.append(w)
-            sc = r.get("source_count")
-            total_source_count += int(sc) if isinstance(sc, (int, float)) and sc >= 0 else 1
-            if r.get("rationale"):
-                rationales.append(str(r["rationale"])[:200])
-            if r.get("caveats"):
-                caveats_list.append(str(r["caveats"])[:150])
-
-        n = len(weighted_prices)
-        if n == 0:
-            methodology = "No public pricing intelligence found. Published rate may be firm."
-            return {
-                "shadow_price": None,
-                "list_price": None,
-                "shadow_price_min": None,
-                "shadow_price_max": None,
-                "confidence": 0.0,
-                "savings_percent": 0,
-                "typical_negotiation_range_low": None,
-                "typical_negotiation_range_high": None,
-                "exceptional_savings": False,
-                "insufficient_consensus": False,
-                "methodology": _tone_sanitize(methodology) or methodology,
-                "rationale": "",
-                "caveats": "Insufficient public data to produce an estimate.",
-            }
-
-        total_w = sum(weights)
-        weighted_median = sum(p * w for p, w in zip(weighted_prices, weights)) / total_w if total_w else sum(weighted_prices) / n
-        min_price = min(ranges_low) if ranges_low else min(weighted_prices)
-        max_price = max(ranges_high) if ranges_high else max(weighted_prices)
-        list_price = round(max(max_price, weighted_median), 2)
-        shadow_price = round(weighted_median, 2)
-        shadow_min = round(min_price, 2)
-        shadow_max = round(max_price, 2)
-
-        # Variance: flag insufficient consensus if > 50%
-        variance_pct = ((max_price - min_price) / weighted_median * 100) if weighted_median else 100
-        insufficient_consensus = variance_pct > 50 or n < 2
-
-        # Confidence: High = 3+ agents within 10%; Medium = 2 or moderate variance; Low = < 2 or high variance
-        within_10pct = sum(1 for p in weighted_prices if abs(p - weighted_median) / weighted_median <= 0.10) if weighted_median else 0
-        if n >= 3 and within_10pct >= 3 and not insufficient_consensus:
-            confidence = 0.8
-        elif n >= 2 or (n >= 1 and variance_pct <= 25):
-            confidence = 0.5
-        else:
-            confidence = 0.3
-        if insufficient_consensus:
-            confidence = min(confidence, 0.5)
-
-        # SYNTHESIS FLOOR-WIDENING: If confidence is low OR source_count < 2, widen range by minimum ±25%
-        need_floor_widening = confidence < 0.5 or total_source_count < 2
-        if need_floor_widening and weighted_median and weighted_median > 0:
-            widen = 0.25
-            shadow_min = round(weighted_median * (1 - widen), 2)
-            shadow_max = round(weighted_median * (1 + widen), 2)
-            shadow_min = min(shadow_min, min_price) if ranges_low else shadow_min
-            shadow_max = max(shadow_max, max_price) if ranges_high else shadow_max
-
-        raw_savings = ((list_price - shadow_price) / list_price) * 100 if list_price else 0
-        savings_percent = round(min(raw_savings, SAVINGS_CAP_PERCENT), 1)
-        exceptional_savings = raw_savings > SAVINGS_CAP_PERCENT
-
-        # Typical negotiation range (percent below published)
-        neg_low = round(max(0, ((list_price - shadow_max) / list_price) * 100), 0) if list_price else 0
-        neg_high = round(min(50, ((list_price - shadow_min) / list_price) * 100), 0) if list_price else 0
-        typical_negotiation_range_low = int(neg_low)
-        typical_negotiation_range_high = int(neg_high)
-
-        rationale = " ".join(rationales[:3]) if rationales else f"Based on {n} public source(s). Median estimate ${shadow_min:.0f}–${shadow_max:.0f}/mo."
-        caveats = " ".join(caveats_list[:2]) if caveats_list else "Estimate only; verify current rates independently."
-        if insufficient_consensus:
-            caveats = "Insufficient consensus across sources; range is wide. " + caveats
-        if need_floor_widening:
-            caveats = "Range widened to reflect limited evidence. " + caveats
-        methodology = f"Weighted median of {n} agent estimates (range ${shadow_min:.0f}–${shadow_max:.0f}/mo)."
-        return {
-            "shadow_price": shadow_price,
-            "list_price": list_price,
-            "shadow_price_min": shadow_min,
-            "shadow_price_max": shadow_max,
-            "confidence": round(confidence, 2),
-            "savings_percent": savings_percent,
-            "typical_negotiation_range_low": typical_negotiation_range_low,
-            "typical_negotiation_range_high": typical_negotiation_range_high,
-            "exceptional_savings": exceptional_savings,
-            "insufficient_consensus": insufficient_consensus,
-            "source_count": total_source_count,
-            "methodology": _tone_sanitize(methodology) or methodology,
-            "rationale": _tone_sanitize(rationale) or rationale,
-            "caveats": _tone_sanitize(caveats) or caveats,
-        }
-
-    def _mock_agent_response(self, agent: Dict) -> Dict:
-        """Return mock pricing result when Ollama is not available (legal-safe format)."""
+    def _mock_agent_response(self, agent_id: int, agent_name: str) -> Dict:
+        """Return mock pricing result when Ollama is not available."""
         import random
-        if agent["type"] == "synthesis":
-            return {
-                "agent_name": agent["name"],
-                "agent_id": agent["id"],
-                "status": "success",
-                "shadow_price": 79,
-                "list_price": 99,
-                "confidence": 0.7,
-                "savings_percent": 20,
-                "methodology": "Mock mode (Ollama not installed). Install Ollama for real analysis.",
-            }
-        # Some agents "find" a range, others don't (for variety)
         price = random.choice([None, 79, 89, 99]) if random.random() > 0.4 else None
         price = _normalize_price_found(price)
         low = round(price * 0.9, 2) if price else None
         high = round(price * 1.1, 2) if price else None
         conf = round(random.uniform(0.5, 0.9), 2) if price else 0
         return {
-            "agent_name": agent["name"],
-            "agent_id": agent["id"],
+            "agent_name": agent_name,
+            "agent_id": agent_id,
             "status": "success",
             "price_found": price,
             "estimated_range_low": low,
             "estimated_range_high": high,
             "confidence": conf,
             "source_count": 1 if price else 0,
-            "rationale": f"Mock finding for {agent['name']} (Ollama not installed)." if price else "",
+            "rationale": f"Mock finding for {agent_name} (Ollama not installed)." if price else "",
             "caveats": "Mock data; install Ollama for real analysis.",
-            "evidence": f"Mock finding for {agent['name']} (Ollama not installed)." if price else None,
         }
 
-    def run_local_agent(self, agent: Dict, target_url: str, scraped_data: str) -> Dict:
-        """Run single Ollama agent with memory cleanup. Uses legal-safe analyst framework."""
+    def run_single_agent(self, agent_id: int, url: str) -> Dict:
+        """
+        Run a single agent synchronously. Called by auditor.run_audit.
+        This method scrapes data and runs Ollama for the agent.
+        """
+        agent = get_agent_by_id(agent_id)
+        if not agent:
+            return {"agent_id": agent_id, "error": "Agent not found", "status": "failed"}
 
+        agent_name = agent.get("name", f"Agent {agent_id}")
+        source_type = agent.get("source_type", "unknown")
+
+        # Mock mode
+        if USE_MOCK_LLM or not OLLAMA_PACKAGE_AVAILABLE:
+            return self._mock_agent_response(agent_id, agent_name)
+
+        # Scrape data based on source type
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        if source_type == "official_page":
+            data = loop.run_until_complete(scraper.fetch(url))
+        elif source_type == "wayback":
+            data = loop.run_until_complete(scraper.fetch_wayback(url))
+        elif source_type == "partner_program":
+            # Partner program: scrape the main URL + common partner page paths
+            partner_paths = ["/partners", "/partner", "/resellers", "/agency"]
+            data = loop.run_until_complete(scraper.fetch(url))
+            for path in partner_paths:
+                partner_url = url.rstrip("/") + path
+                partner_data = loop.run_until_complete(scraper.fetch(partner_url))
+                if partner_data:
+                    data += f"\n\n--- Partner Page ---\n{partner_data[:3000]}"
+                    break
+        elif source_type == "public_record":
+            # Public records: Wayback + main site
+            data = loop.run_until_complete(scraper.fetch(url))
+            wayback_data = loop.run_until_complete(scraper.fetch_wayback(url))
+            if wayback_data:
+                data += f"\n\n--- Historical Archive ---\n{wayback_data[:3000]}"
+        else:
+            data = f"Analyzing {url} for {source_type} intelligence..."
+
+        if not data:
+            data = f"No data found for {url}"
+
+        # Run Ollama
+        return self._run_ollama_agent(agent, url, data)
+
+    def _run_ollama_agent(self, agent: Dict, url: str, scraped_data: str) -> Dict:
+        """Run Ollama for a single agent."""
         UNIVERSAL_SYSTEM = """You are a competitive pricing analyst.
 
 IMPORTANT CONSTRAINTS:
@@ -1079,7 +979,6 @@ CONFIDENCE RUBRIC:
 
 POST-PROCESSING: Use uncertainty language ("likely", "typically", "suggests"); ensure "estimate" appears in rationale or caveats. Never present narrow ranges from weak evidence."""
 
-        # Agent 1: Official documentation
         OFFICIAL_PROMPT = f"""You are analyzing official pricing documentation.
 Extract only explicitly stated prices.
 Note any "Contact Sales" or custom pricing indicators.
@@ -1089,7 +988,6 @@ Content: {scraped_data[:8000]}
 
 Return ONLY valid JSON with: published_price, estimated_range_low, estimated_range_high, confidence, discount_likelihood, rationale, caveats, source_type (use "official documentation"), source_count (number of distinct public sources cited)."""
 
-        # Agents 2-9: Community / public sources — tightened rule
         COMMUNITY_PROMPT_TEMPLATE = """You are analyzing public community discussions.
 
 COMMUNITY RULE: Extract price mentions only if numeric values are stated explicitly AND framed as personal experience or direct observation. Exclude hearsay, speculation, or vague references ("about", "roughly", "around").
@@ -1103,39 +1001,26 @@ Return ONLY valid JSON with: published_price (or null), estimated_range_low, est
 """
 
         content_6k = scraped_data[:6000]
-        content_4k = scraped_data[:4000]
-        prompts = {
-            "website": OFFICIAL_PROMPT,
-            "reddit": COMMUNITY_PROMPT_TEMPLATE.format(content=content_6k),
-            "reviews": COMMUNITY_PROMPT_TEMPLATE.format(content=content_6k),
-            "historical": COMMUNITY_PROMPT_TEMPLATE.format(content=content_6k),
-            "pdf": COMMUNITY_PROMPT_TEMPLATE.format(content=content_6k),
-            "forums": COMMUNITY_PROMPT_TEMPLATE.format(content=content_6k),
-            "social": COMMUNITY_PROMPT_TEMPLATE.format(content=content_4k),
-            "linkedin": COMMUNITY_PROMPT_TEMPLATE.format(content=content_4k),
-            "community": COMMUNITY_PROMPT_TEMPLATE.format(content=content_6k),
-            "synthesis": "",
-        }
+        source_type = agent.get("source_type", "official_page")
+
+        if source_type == "official_page":
+            prompt = OFFICIAL_PROMPT
+        else:
+            prompt = COMMUNITY_PROMPT_TEMPLATE.format(content=content_6k)
 
         try:
-            # Mock mode only when Ollama package is not installed or explicitly requested
-            if USE_MOCK_LLM or not OLLAMA_PACKAGE_AVAILABLE:
-                return self._mock_agent_response(agent)
-
-            # Use real Ollama
             logger.info("Ollama chat begin: agent=%s", agent.get("name"))
             response = _ollama_module.chat(
                 model=MODEL_NAME,
                 messages=[
                     {'role': 'system', 'content': UNIVERSAL_SYSTEM},
-                    {'role': 'user', 'content': prompts.get(agent["type"], prompts["website"])}
+                    {'role': 'user', 'content': prompt}
                 ],
                 options={'temperature': 0.1, 'num_ctx': 4096}
             )
 
             content = response['message']['content']
 
-            # Extract JSON from response (sometimes LLM adds markdown)
             if '```json' in content:
                 content = content.split('```json')[1].split('```')[0]
             elif '```' in content:
@@ -1145,29 +1030,21 @@ Return ONLY valid JSON with: published_price (or null), estimated_range_low, est
             result['agent_name'] = agent['name']
             result['agent_id'] = agent['id']
             result['status'] = 'success'
-            # Normalize to internal format: price_found (midpoint for consensus), confidence 0-1
+
+            # Normalize price_found
             result["price_found"] = None
-            result["estimated_range_low"] = result.get("estimated_range_low")
-            result["estimated_range_high"] = result.get("estimated_range_high")
             low = _normalize_price_found(result.get("estimated_range_low"))
             high = _normalize_price_found(result.get("estimated_range_high"))
-            pub = _normalize_price_found(result.get("published_price"))
             if low is not None and high is not None:
                 result["price_found"] = round((low + high) / 2, 2)
                 result["estimated_range_low"] = low
                 result["estimated_range_high"] = high
             elif low is not None:
                 result["price_found"] = low
-                result["estimated_range_low"] = result["estimated_range_high"] = low
             elif high is not None:
                 result["price_found"] = high
-                result["estimated_range_low"] = result["estimated_range_high"] = high
-            elif isinstance(result.get("price_found"), (int, float)):
-                # Legacy: agent returned price_found
-                result["price_found"] = _normalize_price_found(result.get("price_found"))
-                if result["price_found"] is not None:
-                    result["estimated_range_low"] = result["estimated_range_high"] = result["price_found"]
-            # Confidence: string -> numeric for consensus weighting
+
+            # Confidence: string -> numeric
             conf_str = (result.get("confidence") or "").lower().strip()
             if conf_str in ("low", "medium", "high"):
                 result["confidence"] = {"low": 0.33, "medium": 0.66, "high": 0.9}[conf_str]
@@ -1175,20 +1052,19 @@ Return ONLY valid JSON with: published_price (or null), estimated_range_low, est
                 result["confidence"] = 0.5
             else:
                 result["confidence"] = max(0, min(1, float(result["confidence"])))
+
             if not result.get("rationale"):
                 result["rationale"] = result.get("evidence") or ""
             if not result.get("caveats"):
                 result["caveats"] = "Estimate based on limited public signals."
-            # source_count: number of distinct sources cited (default 1 per agent that contributed)
+
             sc = result.get("source_count")
-            result["source_count"] = int(sc) if isinstance(sc, (int, float)) and sc >= 0 else (1 if result.get("price_found") is not None or (low is not None or high is not None) else 0)
+            result["source_count"] = int(sc) if isinstance(sc, (int, float)) and sc >= 0 else (1 if result.get("price_found") is not None else 0)
+
             logger.info("Ollama chat end: agent=%s", agent.get("name"))
             return result
 
-        except OllamaNotRunningError:
-            raise
         except Exception as e:
-            # Connection refused / unreachable -> show clear message in UI
             err_str = str(e).lower()
             if "connection" in err_str or "refused" in err_str or "11434" in err_str or "connect" in err_str:
                 path = find_ollama_path()
@@ -1203,13 +1079,13 @@ Return ONLY valid JSON with: published_price (or null), estimated_range_low, est
                 'status': 'failed'
             }
         finally:
-            # CRITICAL: Aggressive memory cleanup for 16GB RAM
             gc.collect()
 
-    async def hunt(self, target_url: str, cancelled_event: Optional[asyncio.Event] = None, preview: bool = False):
-        """Run all 10 agents. (preview flag ignored; full hunt only for testing.)"""
-        total = len(AGENTS)
-        all_findings = []
+    async def execute(self, target_url: str, cancelled_event: Optional[asyncio.Event] = None):
+        """
+        Execute the audit using the auditor module's run_audit.
+        Streams progress via WebSocket.
+        """
         cancelled_event = cancelled_event or asyncio.Event()
         heartbeat_state = {"current_agent": 0, "stop": False}
 
@@ -1229,86 +1105,78 @@ Return ONLY valid JSON with: published_price (or null), estimated_range_low, est
                     break
 
         heartbeat_task = asyncio.create_task(heartbeat_loop())
+
         try:
-            for i, agent in enumerate(AGENTS, 1):
+            # Get agent list for progress tracking
+            agents = get_agent_list_for_frontend()
+            active_agents = [a for a in agents if a.get("active") and not a.get("deprecated")]
+
+            for i, agent_info in enumerate(agents, 1):
                 if cancelled_event.is_set():
                     break
-                heartbeat_state["current_agent"] = i
 
-                # CRITICAL: Send "running" FIRST so UI updates before any heavy work
-                logger.info("Starting Agent %s: %s", i, agent['name'])
-                await self.send_progress(i, total, agent['name'], "running")
+                heartbeat_state["current_agent"] = i
+                agent_id = agent_info["id"]
+                agent_name = agent_info["name"]
+                is_deprecated = agent_info.get("deprecated", False)
+                is_active = agent_info.get("active", False)
+
+                # Send "running" status
+                logger.info("Starting Agent %s: %s", i, agent_name)
+                await self.send_progress(i, agent_name, "running")
+
+                if is_deprecated or not is_active:
+                    # Skip deprecated/inactive agents but show status
+                    await self.send_progress(i, agent_name, "skipped")
+                    await asyncio.sleep(0.1)
+                    continue
 
                 if TEST_MODE:
                     logger.info("TEST_MODE: simulating Agent %s (1s)", i)
                     await asyncio.sleep(1.0)
                     result = {
-                        'agent_name': agent['name'],
-                        'agent_id': agent['id'],
+                        'agent_name': agent_name,
+                        'agent_id': agent_id,
                         'price_found': 99 if i == 1 else None,
                         'confidence': 0.8,
                         'status': 'success',
                     }
                     self.results.append(result)
-                    if result.get('price_found'):
-                        all_findings.append(result)
-                    await self.send_progress(i, total, agent['name'], "completed")
+                    await self.send_progress(i, agent_name, "completed")
                     await asyncio.sleep(0.2)
                     continue
-
-                # Scrape (async; event loop can process WebSocket)
-                logger.info("Scraping for Agent %s: %s", i, agent['name'])
-                if agent['type'] == 'website':
-                    data = await scraper.fetch(target_url)
-                elif agent['type'] == 'reddit':
-                    data = await scraper.fetch_reddit(target_url)
-                elif agent['type'] == 'historical':
-                    data = await scraper.fetch_wayback(target_url)
-                elif agent['type'] == 'reviews':
-                    data = await scraper.fetch_g2_reviews(target_url)
-                    if not data:
-                        data = "(No G2 reviews page found for this domain.)"
-                else:
-                    data = f"Analyzing {target_url} for {agent['type']} intelligence..."
-                logger.info("Scrape done for Agent %s, starting Ollama...", i)
 
                 if cancelled_event.is_set():
                     break
 
-                # Run Ollama in thread (so event loop stays free for heartbeat/WebSocket)
+                # Run agent in thread to keep event loop free
                 try:
-                    logger.info("Ollama call begin Agent %s", i)
+                    logger.info("Running Agent %s: %s", i, agent_name)
                     result = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self.run_local_agent,
-                            agent,
-                            target_url,
-                            data
-                        ),
+                        asyncio.to_thread(self.run_single_agent, agent_id, target_url),
                         timeout=AGENT_TIMEOUT_SECONDS
                     )
-                    logger.info("Ollama call end Agent %s", i)
+                    logger.info("Agent %s completed", i)
                     self.results.append(result)
-                    if result.get('price_found'):
-                        all_findings.append(result)
-                    await self.send_progress(i, total, agent['name'], "completed")
+                    await self.send_progress(i, agent_name, "completed")
                 except asyncio.TimeoutError:
-                    logger.warning("Agent %s timed out after %ss", agent['name'], AGENT_TIMEOUT_SECONDS)
+                    logger.warning("Agent %s timed out after %ss", agent_name, AGENT_TIMEOUT_SECONDS)
                     result = {
-                        'agent_name': agent['name'],
-                        'agent_id': agent['id'],
+                        'agent_name': agent_name,
+                        'agent_id': agent_id,
                         'error': f'Timeout after {AGENT_TIMEOUT_SECONDS}s',
                         'price_found': None,
                         'confidence': 0,
                         'status': 'failed'
                     }
                     self.results.append(result)
-                    await self.send_progress(i, total, agent['name'], "timeout")
+                    await self.send_progress(i, agent_name, "timeout")
                 except OllamaNotRunningError as e:
                     await self.ws.send_json({"error": str(e)})
                     return
 
                 await asyncio.sleep(0.5)
+
         finally:
             heartbeat_state["stop"] = True
             heartbeat_task.cancel()
@@ -1318,11 +1186,10 @@ Return ONLY valid JSON with: published_price (or null), estimated_range_low, est
                 pass
 
         if cancelled_event.is_set():
-            # Partial results; no synthesis
             db_update(
                 self.audit_id,
                 status='cancelled',
-                progress=int((len(self.results) / total) * 100),
+                progress=int((len(self.results) / self.total_agents) * 100),
                 results=json.dumps({
                     'findings': self.results,
                     'consensus': None,
@@ -1338,10 +1205,16 @@ Return ONLY valid JSON with: published_price (or null), estimated_range_low, est
             })
             return
 
-        # Agent 10 (Consensus): programmatic only — no Ollama call (eliminates freeze)
-        await self.send_progress(total, total, "Finalizing Report", "synthesizing")
-        final_result = self._compute_consensus_programmatic()
-        final_result = legal_safety_check(final_result)
+        # Run consensus via auditor module
+        await self.send_progress(self.total_agents, "Finalizing Report", "synthesizing")
+
+        # Use auditor's run_audit for consensus
+        def sync_run_agent(agent_id: int, url: str) -> Dict:
+            """Sync wrapper for run_single_agent."""
+            return self.run_single_agent(agent_id, url)
+
+        findings, consensus = run_audit(target_url, sync_run_agent)
+        consensus = legal_safety_check(consensus)
 
         db_update(
             self.audit_id,
@@ -1349,16 +1222,16 @@ Return ONLY valid JSON with: published_price (or null), estimated_range_low, est
             progress=100,
             results=json.dumps({
                 'findings': self.results,
-                'consensus': final_result,
+                'consensus': consensus,
                 'url': target_url,
                 'completed_at': datetime.now().isoformat()
             })
         )
-        # Force one final status update so Agent 10 (Consensus Validator) shows "Analysis Complete" before complete
-        await self.send_progress(total, total, "Consensus Validator", "completed")
+
+        await self.send_progress(self.total_agents, "Consensus Validator", "completed")
         await self.ws.send_json({
             "type": "complete",
-            "data": final_result,
+            "data": consensus,
             "all_findings": _sanitize_findings(self.results),
         })
 
@@ -1548,7 +1421,7 @@ async def create_checkout(request: Request, body: AuditRequest):
 
 @app.post("/api/stripe-webhook")
 async def stripe_webhook(request: Request):
-    """Handle checkout.session.completed: mark audit paid and log email confirmation."""
+    """Handle checkout.session.completed: mark audit paid and send email confirmation."""
     if not stripe or not STRIPE_SECRET_KEY:
         raise HTTPException(status_code=503, detail="Stripe not configured")
     payload = await request.body()
@@ -1567,7 +1440,29 @@ async def stripe_webhook(request: Request):
         audit_id = (session.get("metadata") or {}).get("audit_id")
         if audit_id:
             db_set_paid(audit_id)
-            logger.info("Email confirmation: Payment received for audit %s (customer can run audit at /audit/%s)", audit_id, audit_id)
+            
+            # Get audit details for email
+            row = db_get(audit_id)
+            target_url = row[1] if row else "unknown"
+            user_id = db_audit_get_user_id(row) if row else None
+            
+            # Get customer email from Stripe session or user record
+            customer_email = session.get("customer_details", {}).get("email")
+            if not customer_email and user_id:
+                user_row = db_user_by_id(user_id)
+                customer_email = user_row[1] if user_row else None
+            
+            # Send email notification (non-blocking, logs errors but doesn't fail webhook)
+            base_url = str(request.base_url).rstrip("/")
+            if customer_email:
+                # Run email send in background to not block webhook response
+                asyncio.create_task(
+                    asyncio.to_thread(send_report_email, customer_email, audit_id, target_url, base_url)
+                )
+            else:
+                logger.warning("No email available for audit %s - cannot send confirmation", audit_id)
+            
+            logger.info("Payment received for audit %s (customer can run audit at %s/audit/%s)", audit_id, base_url, audit_id)
     return {"received": True}
 
 
@@ -1575,6 +1470,12 @@ async def stripe_webhook(request: Request):
 async def api_health():
     """Return Ollama connection status and whether the model is available."""
     return get_ollama_health()
+
+
+@app.get("/api/agents")
+async def get_agents():
+    """Return list of agents for frontend display."""
+    return get_agent_list_for_frontend()
 
 
 @app.post("/api/audit")
@@ -1709,10 +1610,10 @@ async def websocket_endpoint(websocket: WebSocket, audit_id: str):
 
     recv_task = asyncio.create_task(receive_stop())
     try:
-        logger.info("hunt() starting (full): audit_id=%s url=%s free_trial=%s", audit_id, target_url, run_full_free)
-        swarm = ShadowSwarm(audit_id, websocket)
-        await swarm.hunt(target_url, cancelled_event, preview=False)
-        logger.info("hunt() finished: audit_id=%s", audit_id)
+        logger.info("Audit starting: audit_id=%s url=%s free_trial=%s", audit_id, target_url, run_full_free)
+        executor = AuditExecutor(audit_id, websocket)
+        await executor.execute(target_url, cancelled_event)
+        logger.info("Audit finished: audit_id=%s", audit_id)
         if run_full_free and user_id:
             db_user_set_free_tier_used(user_id)
             logger.info("Free tier marked used for user_id=%s", user_id)

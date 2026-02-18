@@ -11,3 +11,4 @@ stripe>=7.0
 PyJWT>=2.0
 passlib[bcrypt]
 Pillow
+resend

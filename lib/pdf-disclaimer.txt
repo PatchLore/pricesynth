@@ -1,0 +1,8 @@
+Add this header/footer to every PDF page if you keep PDF delivery temporarily:
+
+---
+AUTOMATED DATA AGGREGATION - FOR INFORMATIONAL USE ONLY
+Not audited. Not verified. Not professional advice.
+Sources: Public pricing pages, Archive.org, public contracts only.
+Generated: [DATE] | Verify independently before use.
+---
